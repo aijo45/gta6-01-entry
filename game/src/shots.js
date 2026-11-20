@@ -21,7 +21,9 @@ function planRoute(x, y, tx, ty) {
   const gy = nearestValue(STREETS, ty);
   const sx = nearestValue(AVENUES, x);
   const sy = nearestValue(STREETS, y);
-  return [{ x: sx, y: sy }, { x: gx, y: sy }, { x: gx, y: gy }];
+  const legs = [{ x: sx, y: sy }, { x: gx, y: sy }, { x: gx, y: gy }];
+  // Drop consecutive duplicates (the goal avenue/street can coincide).
+  return legs.filter((leg, i) => i === 0 || leg.x !== legs[i - 1].x || leg.y !== legs[i - 1].y);
 }
 
 /** Drive/walk toward the current goal: returns the input for one step. */
@@ -53,6 +55,8 @@ function autopilot(world, goals) {
         if (bestD < 52) {
           input.enter = true;
           world._shotDrove = true;
+          // Re-plan the route from the car, not from where the player walked.
+          world._route = null;
           return input;
         }
         walkToward(input, p, best.x, best.y);
@@ -63,7 +67,8 @@ function autopilot(world, goals) {
     walkToward(input, p, wp.x, wp.y);
     return input;
   }
-  // Driving: steer toward the next route waypoint; reverse out when stuck.
+  // Driving: steer toward the next route waypoint; brake for sharp turns and
+  // reverse out when the car has not moved for a while.
   const car = p.car;
   const wp = nextWaypoint(world, goal);
   const d = dist(car.x, car.y, wp.x, wp.y);
@@ -73,17 +78,35 @@ function autopilot(world, goals) {
   }
   const targetAngle = Math.atan2(wp.y - car.y, wp.x - car.x);
   const diff = angleDiff(car.angle, targetAngle);
-  if (world._stuckTimer === undefined) world._stuckTimer = 0;
-  if (Math.abs(car.speed) < 25 && Math.abs(diff) > 0.4) world._stuckTimer += STEP;
-  else world._stuckTimer = 0;
-  if (world._stuckTimer > 1.2) {
-    input.throttle = -0.8;
-    input.steer = 1;
-    if (world._stuckTimer > 2.2) world._stuckTimer = 0;
+  // Stuck means the car barely moved in the last second while trying to drive.
+  if (!world._lastDrivePos) world._lastDrivePos = { x: car.x, y: car.y, t: world.time };
+  const last = world._lastDrivePos;
+  if (world.time - last.t >= 1) {
+    const moved = dist(car.x, car.y, last.x, last.y);
+    world._stuck = moved < 20;
+    world._lastDrivePos = { x: car.x, y: car.y, t: world.time };
+  }
+  if (world._stuck) {
+    input.throttle = -0.9;
+    input.steer = world._unstickDir ?? 1;
+    world._unstickTime = (world._unstickTime ?? 0) + STEP;
+    if (world._unstickTime > 1.1) {
+      world._stuck = false;
+      world._unstickTime = 0;
+      world._unstickDir = (world._unstickDir ?? 1) * -1;
+      world._lastDrivePos = { x: car.x, y: car.y, t: world.time };
+      // Re-plan from the nearest intersection instead of aiming at a
+      // waypoint the car can no longer reach cleanly.
+      world._route = null;
+    }
     return input;
   }
   input.steer = clamp(diff * 2.2, -1, 1);
-  input.throttle = Math.abs(diff) > 1.5 ? 0.25 : 1;
+  // Slow down for the turn: a car turning at speed swings wide off the road,
+  // so brake hard for a sharp turn and ease through a bend.
+  if (Math.abs(diff) > 0.9) input.throttle = car.speed > 120 ? -0.6 : 0.3;
+  else if (Math.abs(diff) > 0.5) input.throttle = car.speed > 220 ? -0.3 : 0.5;
+  else input.throttle = 1;
   return input;
 }
 
@@ -103,8 +126,8 @@ function nextWaypoint(world, goal) {
     world._routeGoal = key;
   }
   const route = world._route;
-  while (route.length > 1 && dist(p.x, p.y, route[0].x, route[0].y) < 50) route.shift();
-  if (route.length === 1 && dist(p.x, p.y, route[0].x, route[0].y) < 50) {
+  while (route.length > 1 && dist(p.x, p.y, route[0].x, route[0].y) < 90) route.shift();
+  if (route.length === 1 && dist(p.x, p.y, route[0].x, route[0].y) < 90) {
     // Last leg: the final approach, straight to the goal itself.
     return goal;
   }
@@ -143,12 +166,16 @@ export function stageShot(name, world) {
     world.missionIndex = 3;
     world.missionsDone = 3;
     world.money = 1350;
-    // Stop short of the airstrip so the chase is still on in the frame.
-    runSteps(world, 16, [{ x: 2500, y: 500 }]);
+    // Stage the scene near the airstrip: the player starts on foot by the
+    // Verde Bay Airfield road, steals the nearest car and runs for the strip
+    // with three cruisers already closing in.
+    world.player.x = 2400;
+    world.player.y = 700;
+    runSteps(world, 12, [{ x: 2500, y: 500 }]);
     return 'play';
   }
   // drive: a cross-town loop, so the car is still moving in the frame.
-  runSteps(world, 26, [{ x: 2600, y: 1800 }, { x: 600, y: 600 }]);
+  runSteps(world, 26, [{ x: 2600, y: 1800 }, { x: 600, y: 600 }, { x: 2600, y: 600 }, { x: 600, y: 1800 }]);
   return 'play';
 }
 
